@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 6. Copy the rest of the application code
 COPY ./app ./app
-COPY ./scripts ./scripts # If any scripts are needed at runtime (unlikely for API)
+# COPY ./scripts ./scripts # If any scripts are needed at runtime (unlikely for API) <-- COMMENTED OUT
 # If you have other directories like a 'data' dir for static assets needed by the app, copy them too.
 
 # 7. Expose the port the app runs on (matches Uvicorn command)
@@ -32,5 +32,4 @@ EXPOSE 8000
 # This will be overridden by Render.com's start command, but good for local Docker testing.
 # Use Gunicorn as a production-ready ASGI server with Uvicorn workers.
 # You'll need to add gunicorn to your requirements.txt
-# CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "4", "-b", "0.0.0.0:8000", "app.main:app"]
