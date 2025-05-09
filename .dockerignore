@@ -1,0 +1,32 @@
+# news-rag-backend/.dockerignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.env.*
+.settings/
+.idea/
+.vscode/
+*.sqlite3
+*.log
+logs/
+*.pot
+*.pot~
+.git
+.gitignore
+.dockerignore
+docker-compose.yml
+Dockerfile # Sometimes excluded if build context is carefully managed
+# Local data/storage for Qdrant and Redis (if they were ever inside the app dir, which they aren't)
+qdrant_storage/
+redis_data/
+# Test files are usually not needed in the production image
+tests/
+test_*.py
+data/raw_articles/ # Exclude if you're not bundling these into the image
+data/metadata.json # Exclude if not bundling
+# If you have a large 'data' directory that's not needed by the running app, exclude it.

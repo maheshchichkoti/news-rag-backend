@@ -1,0 +1,12 @@
+[
+  {
+    "filename": "article_01.txt",
+    "original_url": "http://actual-news-url.com/article1",
+    "source_name": "Reuters"
+  },
+  {
+    "filename": "article_02.txt",
+    "original_url": "http://another-news-url.com/storyA",
+    "source_name": "AP News"
+  }
+]

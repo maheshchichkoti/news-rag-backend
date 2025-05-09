@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.log
+
+# Virtual environment
+venv/
+.env
+.env.*
+
+# Jupyter / notebook
+.ipynb_checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+
+# Redis / Qdrant / Local data
+qdrant_storage/
+redis_data/
+
+# Misc
+*.sqlite3
+*.db
+.DS_Store
