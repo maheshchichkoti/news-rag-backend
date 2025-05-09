@@ -130,30 +130,37 @@ async def shutdown_event():
 
 
 # --- API Endpoints ---
-
 @app.get("/health", tags=["Health"], response_model=schemas.HealthResponse)
 async def health_check():
     """
-    Simple health check. Verifies basic API responsiveness and checks critical service components.
+    Enhanced health check with memory monitoring
     """
+    import psutil
+    memory = psutil.virtual_memory()
+    
     # Basic checks
     api_status = "ok"
-    messages = ["API is responsive."]
+    messages = [
+        f"API is responsive (Memory: {memory.percent}% used, {memory.available/1024/1024:.1f}MB available)",
+        f"Load: {os.getloadavg()[0]:.2f}"
+    ]
     
-    # Check core components from ingestion_service
+    # Service checks
     if not all([ingestion_service.qdrant_client, ingestion_service.embedding_model, ingestion_service.tokenizer]):
         api_status = "error"
-        messages.append("Ingestion service core components (Qdrant, Embedder, Tokenizer) not ready.")
+        messages.append("Ingestion service core components not ready")
     
-    # Check core components from rag_service
     if not all([rag_service.redis_client, rag_service.generative_llm, rag_service.query_embedding_model]):
         api_status = "error"
-        messages.append("RAG service core components (Redis, LLM, Query Embedder) not ready.")
+        messages.append("RAG service core components not ready")
 
-    if api_status == "ok":
-        messages.append("All critical services appear to be initialized.")
-        
-    return schemas.HealthResponse(status=api_status, message="; ".join(messages))
+    return {
+        "status": api_status,
+        "message": "; ".join(messages),
+        "memory_used_percent": memory.percent,
+        "memory_available_mb": memory.available/1024/1024,
+        "system_load": os.getloadavg()[0]
+    }
 
 # --- Session Management Endpoints ---
 @app.post("/session/new", response_model=schemas.SessionResponse, tags=["Session"])
