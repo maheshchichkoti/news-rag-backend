@@ -27,4 +27,4 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY ./app ./app
 
 # 8. Reduce Gunicorn workers for Render's free tier (1GB RAM)
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "2", "--threads", "2", "-b", "0.0.0.0:$PORT", "--timeout", "120", "app.main:app"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "2", "--threads", "2", "-b", "0.0.0.0:8000", "--timeout", "120", "app.main:app"]
