@@ -1,7 +1,9 @@
 # app/main.py
 import logging
 import sys
+import os 
 import json # For SSE data formatting if needed
+import time
 from typing import Annotated # For Header dependency
 import traceback # For logging exceptions
 
@@ -70,6 +72,11 @@ app.add_middleware(
 # --- Lifecycle Events ---
 @app.on_event("startup")
 async def startup_event():
+    # Add startup delay from environment variable
+    startup_delay = int(os.getenv("STARTUP_DELAY", "15"))  # Default to 15 seconds if not set
+    logger.info(f"Delaying startup for {startup_delay} seconds to allow services to initialize...")
+    time.sleep(startup_delay)
+    
     logger.info("FastAPI application startup event commencing...")
 
     # Critical services initialization checks
