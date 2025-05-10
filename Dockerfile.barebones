@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements-barebones.txt && \
     rm -rf /root/.cache
 
 # Copy only the necessary files
-COPY ./app/main.py .
+COPY ./app/main_barebones.py ./main.py
 
 # Use this simple CMD (no variable substitution needed)
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
