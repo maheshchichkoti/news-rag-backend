@@ -3,6 +3,5 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.34.0
 python-dotenv>=1.0.0
 redis>=5.0.0
-# pydantic and pydantic-settings are usually pulled by fastapi, but explicitly add if needed
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
+pydantic>=2.0.0 # FastAPI dependency, good to be explicit
+pydantic-settings>=2.0.0 # For your config
