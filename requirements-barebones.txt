@@ -1,7 +1,0 @@
-# news-rag-backend/requirements-barebones.txt
-fastapi>=0.115.0
-uvicorn[standard]>=0.34.0
-# python-dotenv # Removing for this test, will hardcode a value if needed
-# redis # Removing for this test
-# pydantic # FastAPI brings its own pydantic
-# pydantic-settings # Removing for this test

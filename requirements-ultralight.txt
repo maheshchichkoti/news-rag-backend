@@ -1,5 +1,0 @@
-fastapi==0.95.2 # Note: Your previous files had 0.115.12. Keep versions consistent or use >=
-uvicorn==0.22.0 # Note: Your previous files had 0.34.2
-python-dotenv==1.0.0
-# You will also need 'redis' for your current app/main.py and app/services/rag_service.py (for redis_client init)
-# redis>=5.0.0
