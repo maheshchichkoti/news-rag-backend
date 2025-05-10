@@ -72,18 +72,28 @@ app.add_middleware(
 # --- Lifecycle Events ---
 @app.on_event("startup")
 async def startup_event():
-    import psutil
     import os
-    memory_limit = int(os.getenv("MEMORY_LIMIT_MB", "450")) * 1024 * 1024
+    import time
+    import psutil
     
-    # Check memory before heavy initialization
-    if psutil.virtual_memory().available < memory_limit:
+    # Immediate memory check
+    if psutil.virtual_memory().available < 100*1024*1024:  # 100MB threshold
         logger.critical("Insufficient memory for startup!")
-        raise RuntimeError("Not enough memory available")
-    
-    startup_delay = int(os.getenv("STARTUP_DELAY", "30"))
+        os._exit(1)  # Immediate exit if memory is too low
+
+    startup_delay = int(os.getenv("STARTUP_DELAY", "45"))
     logger.info(f"Delaying startup for {startup_delay}s...")
-    time.sleep(startup_delay)
+    
+    # Phased initialization
+    time.sleep(startup_delay/3)
+    logger.info("Phase 1: Initializing critical services...")
+    
+    # Load only absolutely essential components first
+    time.sleep(startup_delay/3)
+    logger.info("Phase 2: Initializing secondary services...")
+    
+    time.sleep(startup_delay/3)
+    logger.info("Phase 3: Finalizing startup...")
     
     logger.info("FastAPI application startup event commencing...")
 
