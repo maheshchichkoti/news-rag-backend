@@ -1,142 +1,92 @@
 # app/main.py
 import logging
 import sys
-import os 
-import json # For SSE data formatting if needed
+import os
+import json
 import time
-from typing import Annotated # For Header dependency
-import traceback # For logging exceptions
+# import psutil # psutil might not be in requirements-minimal.txt, conditional import
+
+from typing import Annotated
+import traceback
 
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from app.core.config import settings
-from app.models import schemas # Import your Pydantic models
-from app.services import rag_service, ingestion_service # Import your services
-from app.utils import helpers # For session ID generation
+from app.core.config import settings # This will now print RAG status on import
+from app.models import schemas
+from app.services import rag_service, ingestion_service
+from app.utils import helpers
 
 # --- Logging Configuration ---
-# Configure root logger - This should be done once, preferably at the very start.
 logging.basicConfig(
-    level=settings.LOG_LEVEL.upper() if hasattr(settings, 'LOG_LEVEL') else logging.INFO, # Default to INFO if not set
+    level=settings.LOG_LEVEL.upper(),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-        # You could add a FileHandler here if needed:
-        # logging.FileHandler("app.log")
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
-
-# Get a logger for this specific module
 logger = logging.getLogger(__name__)
-
-# Optionally, set specific log levels for noisy libraries
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("uvicorn.access").setLevel(logging.WARNING) # uvicorn access logs can be noisy
-logging.getLogger("qdrant_client").setLevel(logging.INFO) # Qdrant can be a bit verbose on DEBUG
+# ... other logger configs
 
 # --- FastAPI Application ---
 app = FastAPI(
     title="News RAG Chatbot API",
     version="0.1.0",
-    description="A RAG-powered chatbot for querying news articles.",
-    # docs_url="/api/docs",  # Customize docs URL
-    # redoc_url="/api/redoc" # Customize ReDoc URL
+    description="A RAG-powered chatbot for querying news articles."
 )
 
 # --- CORS Middleware ---
-# Ensure your frontend origins are correctly listed, especially the deployed one.
-# For development, "http://localhost:3000" and "http://localhost:5173" are common.
-# If settings.FRONTEND_URL is defined, add it.
-origins = settings.CORS_ORIGINS.split(",") if hasattr(settings, 'CORS_ORIGINS') and settings.CORS_ORIGINS else [
-    "http://localhost:3000",
-    "http://localhost:5173",
-]
-if hasattr(settings, 'FRONTEND_URL') and settings.FRONTEND_URL:
-    if settings.FRONTEND_URL not in origins:
-        origins.append(settings.FRONTEND_URL)
-
-logger.info(f"CORS enabled for origins: {origins}")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=settings.CORS_ORIGINS_LIST,
     allow_credentials=True,
-    allow_methods=["*"], # Allows all standard methods
-    allow_headers=["*"], # Allows all headers, including X-Session-Id and Content-Type
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+logger.info(f"CORS enabled for origins: {settings.CORS_ORIGINS_LIST}")
+
 
 # --- Lifecycle Events ---
 @app.on_event("startup")
 async def startup_event():
-    import os
-    import time
-    import psutil
-    
-    # Immediate memory check
-    if psutil.virtual_memory().available < 100*1024*1024:  # 100MB threshold
-        logger.critical("Insufficient memory for startup!")
-        os._exit(1)  # Immediate exit if memory is too low
-
-    startup_delay = int(os.getenv("STARTUP_DELAY", "45"))
-    logger.info(f"Delaying startup for {startup_delay}s...")
-    
-    # Phased initialization
-    time.sleep(startup_delay/3)
-    logger.info("Phase 1: Initializing critical services...")
-    
-    # Load only absolutely essential components first
-    time.sleep(startup_delay/3)
-    logger.info("Phase 2: Initializing secondary services...")
-    
-    time.sleep(startup_delay/3)
-    logger.info("Phase 3: Finalizing startup...")
-    
+    # The STARTUP_DELAY env var is used by Docker CMD.
+    # Render has its own "Initial Health Check Delay" setting.
+    # The phased startup here is an application-level delay/check.
     logger.info("FastAPI application startup event commencing...")
 
-    # Critical services initialization checks
-    # Qdrant client and embedding model (from ingestion_service)
-    if ingestion_service.qdrant_client and ingestion_service.embedding_model and ingestion_service.tokenizer:
-        logger.info("ingestion_service components (Qdrant, Embedder, Tokenizer) seem available.")
-        logger.info("Ensuring Qdrant collection is ready...")
-        if not ingestion_service.ensure_qdrant_collection():
-            logger.critical("CRITICAL: Failed to ensure Qdrant collection on startup. This may impact ingestion and RAG.")
-            # Depending on severity, you might raise an error to stop startup:
-            # raise RuntimeError("Failed to initialize Qdrant collection.")
+    if settings.DISABLE_RAG:
+        logger.warning("ASSESSMENT MODE: RAG features are disabled. Skipping RAG component checks.")
+        # Only check Redis if it's essential for even disabled mode
+        if not rag_service.redis_client:
+            logger.critical("CRITICAL: RAG service Redis client not initialized. Basic session features may fail.")
         else:
-            logger.info("Qdrant collection confirmed or created.")
+            logger.info("RAG service Redis client seems available (for session management).")
     else:
-        missing_ingestion_components = []
-        if not ingestion_service.qdrant_client: missing_ingestion_components.append("Qdrant client")
-        if not ingestion_service.embedding_model: missing_ingestion_components.append("Embedding model")
-        if not ingestion_service.tokenizer: missing_ingestion_components.append("Tokenizer")
-        logger.critical(f"CRITICAL: Ingestion service components missing: {', '.join(missing_ingestion_components)}. Application might not function correctly.")
+        logger.info("FULL MODE: Performing RAG component checks...")
+        # Your existing checks for ingestion_service and rag_service components
+        if ingestion_service.qdrant_client and ingestion_service.embedding_model and ingestion_service.tokenizer:
+            logger.info("Ingestion service components (Qdrant, Embedder, Tokenizer) seem available.")
+            if not ingestion_service.ensure_qdrant_collection():
+                logger.critical("CRITICAL: Failed to ensure Qdrant collection on startup.")
+            else:
+                logger.info("Qdrant collection confirmed or created.")
+        else:
+            logger.critical("CRITICAL: One or more Ingestion service components missing.")
 
-    # RAG service components (Redis, Gemini LLM)
-    if not rag_service.redis_client:
-        logger.critical("CRITICAL: RAG service Redis client not initialized. Chat history will not work.")
-    else:
-        logger.info("RAG service Redis client seems available.")
+        if not rag_service.redis_client: logger.critical("CRITICAL: RAG service Redis client not initialized.")
+        else: logger.info("RAG service Redis client seems available.")
+        if not rag_service.generative_llm: logger.critical("CRITICAL: RAG service Gemini LLM not initialized.")
+        else: logger.info("RAG service Gemini LLM seems available.")
+        if not rag_service.query_embedding_model: logger.critical("CRITICAL: RAG service query_embedding_model not available.")
+        else: logger.info("RAG service query_embedding_model seems available.")
 
-    if not rag_service.generative_llm:
-        logger.critical("CRITICAL: RAG service Gemini LLM not initialized. Chat responses will not be generated.")
-    else:
-        logger.info("RAG service Gemini LLM seems available.")
-    
-    if not rag_service.query_embedding_model: # This should be same as ingestion_service.embedding_model
-        logger.critical("CRITICAL: RAG service query_embedding_model not available.")
-    else:
-        logger.info("RAG service query_embedding_model seems available.")
-
-
-    logger.info("FastAPI application startup complete.")
+    logger.info("FastAPI application startup sequence complete.")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    # ... (your existing shutdown_event code is fine) ...
     logger.info("FastAPI application shutdown event commencing...")
     if rag_service.redis_client:
         try:
@@ -150,113 +100,126 @@ async def shutdown_event():
 # --- API Endpoints ---
 @app.get("/health", tags=["Health"], response_model=schemas.HealthResponse)
 async def health_check():
-    """
-    Enhanced health check with memory monitoring
-    """
-    import psutil
-    memory = psutil.virtual_memory()
-    
-    # Basic checks
     api_status = "ok"
-    messages = [
-        f"API is responsive (Memory: {memory.percent}% used, {memory.available/1024/1024:.1f}MB available)",
-        f"Load: {os.getloadavg()[0]:.2f}"
-    ]
-    
-    # Service checks
-    if not all([ingestion_service.qdrant_client, ingestion_service.embedding_model, ingestion_service.tokenizer]):
-        api_status = "error"
-        messages.append("Ingestion service core components not ready")
-    
-    if not all([rag_service.redis_client, rag_service.generative_llm, rag_service.query_embedding_model]):
-        api_status = "error"
-        messages.append("RAG service core components not ready")
+    mode_message = "RAG features ENABLED."
+    component_messages = []
 
-    return {
-        "status": api_status,
-        "message": "; ".join(messages),
-        "memory_used_percent": memory.percent,
-        "memory_available_mb": memory.available/1024/1024,
-        "system_load": os.getloadavg()[0]
-    }
+    # Try to import psutil only if needed and handle if not present in minimal
+    try:
+        import psutil
+        memory = psutil.virtual_memory()
+        load_avg = os.getloadavg()[0] if hasattr(os, 'getloadavg') else -1 # getloadavg not on all OS e.g. Windows
+        base_message = f"API is responsive (Memory: {memory.percent:.1f}% used, {memory.available/1024/1024:.1f}MB available, Load: {load_avg:.2f})"
+    except ImportError:
+        base_message = "API is responsive (psutil not installed for detailed memory/load)."
+        psutil = None # Ensure psutil is None if import fails
 
-# --- Session Management Endpoints ---
-@app.post("/session/new", response_model=schemas.SessionResponse, tags=["Session"])
-async def create_new_session():
-    """Generates and returns a new unique session ID."""
-    session_id = helpers.generate_session_id()
-    logger.info(f"New session created: {session_id}")
-    return schemas.SessionResponse(session_id=session_id, message="New session created.")
+    if settings.DISABLE_RAG:
+        mode_message = "RAG features DISABLED (Assessment Mode)."
+        if not rag_service.redis_client:
+            api_status = "error"
+            component_messages.append("Redis client (for sessions) not ready.")
+    else: # Full mode checks
+        if not all([ingestion_service.qdrant_client, ingestion_service.embedding_model, ingestion_service.tokenizer]):
+            api_status = "error" # or "warning"
+            component_messages.append("Ingestion service components not ready.")
+        if not all([rag_service.redis_client, rag_service.generative_llm, rag_service.query_embedding_model]):
+            api_status = "error" # or "warning"
+            component_messages.append("RAG service ML components not ready.")
+        if not rag_service.redis_client : # Check redis separately if it was missed
+             api_status = "error"
+             component_messages.append("Redis client not ready.")
 
-# --- Ingestion Endpoint ---
-@app.post("/ingest", response_model=schemas.IngestResponse, tags=["Ingestion"], status_code=202) # Default to 202 Accepted
+
+    final_message = f"{base_message}; {mode_message}"
+    if component_messages:
+        final_message += "; " + "; ".join(component_messages)
+
+    response_data = {"status": api_status, "message": final_message}
+    if psutil: # Only add memory/load if psutil was available
+        response_data["memory_used_percent"] = memory.percent
+        response_data["memory_available_mb"] = memory.available/1024/1024
+        response_data["system_load"] = load_avg
+        
+    return schemas.HealthResponse(**response_data) # Use dict unpacking
+
+# ... (your other endpoints: /session/new, /ingest, /chat, /chat/history, /chat/session/{session_id}/clear)
+# They will now behave differently based on settings.DISABLE_RAG due to changes in the service layer.
+
+@app.post("/ingest", response_model=schemas.IngestResponse, tags=["Ingestion"], status_code=202)
 async def ingest_article_endpoint(article_data: schemas.ArticleIngestRequest):
-    """
-    Ingests a single news article either from a URL or direct text content.
-    The process is asynchronous; this endpoint acknowledges the request.
-    """
+    if settings.DISABLE_RAG:
+        logger.warning("Attempt to use /ingest endpoint while RAG is disabled.")
+        # Consider raising HTTPException or returning a specific message
+        raise HTTPException(status_code=403, detail="Ingestion is disabled in the current mode.")
+        # return JSONResponse(status_code=403, content={"status": "error", "message": "Ingestion is disabled in this mode."})
+
+    # ... (rest of your ingest_article_endpoint logic, it will call the updated ingestion_service)
     logger.info(f"Received ingest request - URL: {article_data.url if article_data.url else 'N/A'}, Text provided: {bool(article_data.text_content)}, Source: {article_data.source_name}")
-    if not all([ingestion_service.qdrant_client, ingestion_service.embedding_model, ingestion_service.tokenizer]):
-        logger.error("Ingestion endpoint called but ingestion service core components are not ready.")
-        raise HTTPException(status_code=503, detail="Ingestion service is not ready (core dependencies missing).")
+    if not all([ingestion_service.qdrant_client, ingestion_service.embedding_model, ingestion_service.tokenizer]): # This check might be redundant if service handles it
+        logger.error("Ingestion endpoint: Ingestion service core components are not ready.")
+        raise HTTPException(status_code=503, detail="Ingestion service is not ready.")
 
     result = await ingestion_service.ingest_single_article(
-        url=article_data.url,
-        text_content=article_data.text_content,
-        source_name=article_data.source_name
+        url=article_data.url, text_content=article_data.text_content, source_name=article_data.source_name
     )
     if result["status"] == "error":
-        logger.error(f"Ingestion failed for source '{article_data.source_name}': {result['message']}")
-        raise HTTPException(status_code=400, detail=result["message"]) # Bad request if input data led to error
+        # Log specific error from service if available
+        logger.error(f"Ingestion failed for source '{article_data.source_name}': {result.get('message', 'Unknown error')}")
+        # Map service error to HTTP error
+        status_code = 400 if "content" in result.get('message','').lower() else 500 # Example logic
+        raise HTTPException(status_code=status_code, detail=result["message"])
     elif result["status"] == "warning":
-        logger.warning(f"Ingestion for source '{article_data.source_name}' completed with warning: {result['message']}")
-        # Still return 202, but the message indicates a warning
+        logger.warning(f"Ingestion for source '{article_data.source_name}' warning: {result['message']}")
         return JSONResponse(status_code=202, content=result)
     
     logger.info(f"Ingestion successful for source '{article_data.source_name}', article_id: {result.get('article_id')}")
     return schemas.IngestResponse(**result)
 
 
-# --- Chat Endpoints ---
 @app.post("/chat", tags=["Chat"])
 async def stream_chat_response(
     chat_request: schemas.ChatRequest,
     x_session_id: Annotated[str | None, Header(convert_underscores=True)] = None
 ):
-    """
-    Handles a user's chat query, performs RAG, and streams Gemini's response.
-    Requires `X-Session-Id` header.
-    """
     if not x_session_id:
-        logger.warning("Chat request received without X-Session-Id header.")
+        logger.warning("Chat request without X-Session-Id header.")
         raise HTTPException(status_code=400, detail="X-Session-Id header is required.")
     
-    logger.info(f"Chat request for session_id: {x_session_id}, query: '{chat_request.query[:100]}...'") # Log only snippet
+    logger.info(f"Chat request for session_id: {x_session_id}, query: '{chat_request.query[:100]}...'")
 
-    # Check if all necessary RAG components are up
-    critical_rag_components = [
-        rag_service.generative_llm,
-        rag_service.query_embedding_model,
-        rag_service.qdrant_client, # Should be same as ingestion_service.qdrant_client
-        rag_service.redis_client
-    ]
-    if not all(critical_rag_components):
-        logger.error(f"Chat service unavailable for session {x_session_id} due to missing critical RAG components.")
-        async def error_stream_service_unavailable():
-            error_message = "Sorry, the chat service is temporarily unavailable due to internal setup issues. Please try again later."
+    # Service availability check (covers DISABLE_RAG implicitly via component status)
+    # Redis is always checked as it's needed for sessions
+    if not rag_service.redis_client:
+         logger.error(f"Chat service unavailable for session {x_session_id}: Redis client missing.")
+         async def error_stream_redis():
+            error_message = "Chat service is temporarily unavailable (session error)."
             yield f"data: {json.dumps({'error': error_message, 'final': True, 'type': 'error'})}\n\n"
-        return StreamingResponse(error_stream_service_unavailable(), media_type="text/event-stream")
+         return StreamingResponse(error_stream_redis(), media_type="text/event-stream")
+
+    if not settings.DISABLE_RAG: # Only check these if RAG is supposed to be enabled
+        critical_rag_components = [
+            rag_service.generative_llm,
+            rag_service.query_embedding_model,
+            # rag_service.qdrant_client_rag, # Already checked by query_embedding_model if it comes from ingestion
+        ]
+        if not all(critical_rag_components) or not rag_service.qdrant_client_rag: # Explicitly check qdrant_client_rag too
+            logger.error(f"Chat service unavailable for session {x_session_id} due to missing RAG ML components.")
+            async def error_stream_ml_unavailable():
+                error_message = "AI features are temporarily unavailable. Please try again later."
+                yield f"data: {json.dumps({'error': error_message, 'final': True, 'type': 'error'})}\n\n"
+            return StreamingResponse(error_stream_ml_unavailable(), media_type="text/event-stream")
 
     async def event_generator():
-        full_response_for_log = [] # Use a list to join later, more efficient for many small strings
+        # ... (your event_generator logic is mostly fine, it calls rag_service.process_chat_query)
+        # process_chat_query will handle DISABLE_RAG internally
+        full_response_for_log = []
         try:
             async for content_chunk in rag_service.process_chat_query(chat_request.query, x_session_id):
                 full_response_for_log.append(content_chunk)
                 yield f"data: {json.dumps({'text': content_chunk, 'type': 'content'})}\n\n"
-            # After the stream is finished, send a final "done" event
             yield f"data: {json.dumps({'event': 'done', 'type': 'event'})}\n\n"
-            final_response_str = "".join(full_response_for_log)
-            logger.info(f"Stream finished for session {x_session_id}. Full response length: {len(final_response_str)}")
+            logger.info(f"Stream finished for session {x_session_id}. Full response logged (len): {len(''.join(full_response_for_log))}")
         except Exception as e:
             logger.error(f"Error during chat streaming for session {x_session_id}: {e}", exc_info=True)
             error_message = "An unexpected error occurred while processing your request."
@@ -264,43 +227,39 @@ async def stream_chat_response(
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-
+# ... (get_session_history, clear_session_history are fine as they only use Redis)
 @app.get("/chat/history/{session_id}", response_model=schemas.SessionHistoryResponse, tags=["Chat"])
 async def get_session_history(session_id: str):
-    """Retrieves the chat history for a given session ID."""
     logger.debug(f"Request for chat history for session_id: {session_id}")
     if not rag_service.redis_client:
         logger.error(f"Attempt to get history for session {session_id} but Redis client unavailable.")
         raise HTTPException(status_code=503, detail="Chat history service (Redis) unavailable.")
-    
     history = await rag_service.get_chat_history(session_id)
     logger.info(f"Retrieved {len(history)} messages for session_id: {session_id}")
+    if not history: # Optional: Be more explicit for empty history on a known session
+        # Could check if session key actually exists in Redis vs truly empty
+        # For now, returning empty list is fine as per Pydantic schema
+        logger.info(f"No history found for session_id: {session_id} (or session does not exist).")
     return schemas.SessionHistoryResponse(session_id=session_id, history=history)
-
 
 @app.post("/chat/session/{session_id}/clear", response_model=schemas.ClearSessionResponse, tags=["Chat"])
 async def clear_session_history(session_id: str):
-    """Clears the chat history for a given session ID."""
     logger.info(f"Request to clear chat history for session_id: {session_id}")
     if not rag_service.redis_client:
         logger.error(f"Attempt to clear history for session {session_id} but Redis client unavailable.")
         raise HTTPException(status_code=503, detail="Chat history service (Redis) unavailable.")
-        
-    await rag_service.clear_chat_history(session_id)
-    logger.info(f"Chat history cleared for session_id: {session_id}")
+    await rag_service.clear_chat_history(session_id) # This service function already logs
     return schemas.ClearSessionResponse(session_id=session_id, message="Chat history cleared successfully.")
+
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    # This configuration is for running with `python app/main.py`
-    # For production, prefer `gunicorn` or `uvicorn` run directly, e.g.:
-    # uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
-    # The log_level here will be overridden by the basicConfig if not using uvicorn's --log-level
+    # ... (your existing __main__ block is fine) ...
     logger.info("Starting Uvicorn server directly for development...")
     uvicorn.run(
         "app.main:app",
-        host=settings.API_HOST if hasattr(settings, 'API_HOST') else "0.0.0.0",
-        port=settings.API_PORT if hasattr(settings, 'API_PORT') else 8000,
-        reload=settings.API_RELOAD if hasattr(settings, 'API_RELOAD') else True,
-        log_level=(settings.LOG_LEVEL.lower() if hasattr(settings, 'LOG_LEVEL') else "info")
+        host=settings.API_HOST,
+        port=settings.API_PORT,
+        reload=settings.API_RELOAD,
+        log_level=(settings.LOG_LEVEL.lower())
     )

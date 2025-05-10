@@ -2,79 +2,87 @@
 import httpx
 from bs4 import BeautifulSoup
 from trafilatura import extract
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient, models
+# SentenceTransformer, QdrantClient, tiktoken will be conditionally imported/used
+from qdrant_client import models as qdrant_models # Keep this for PointStruct if used in stubs
 from qdrant_client.http.models import PointStruct
-import tiktoken
+
 import uuid
 import hashlib
 from typing import List, Dict, Optional
 import traceback
-import logging # Added logging
+import logging
 
 from app.core.config import settings
 
-# Initialize logger for this module
 logger = logging.getLogger(__name__)
 
-logger.info("ingestion_service.py: Top of file, starting initializations...")
+# --- Conditionally Initialize Clients ---
+qdrant_client: Optional['QdrantClient'] = None
+embedding_model: Optional['SentenceTransformer'] = None
+EMBEDDING_DIM: int = 384
+tokenizer: Optional['tiktoken.Encoding'] = None
 
-# --- Initialize Clients ---
-qdrant_client: Optional[QdrantClient] = None
-embedding_model: Optional[SentenceTransformer] = None
-EMBEDDING_DIM: int = 384 # Default, will be updated by model. Using all-MiniLM-L6-v2's dim
-tokenizer = None
-
-try:
-    logger.info("Initializing Qdrant client...")
-    qdrant_client = QdrantClient(
-        url=settings.QDRANT_URL,
-        api_key=settings.QDRANT_API_KEY if settings.QDRANT_API_KEY else None,
-        timeout=20,
-    )
-    logger.info(f"Qdrant client initialized. Target: {settings.QDRANT_URL}")
-except Exception as e:
-    logger.exception(f"Error initializing Qdrant client: {e}")
-
-try:
-    logger.info(f"Loading embedding model: {settings.SENTENCE_TRANSFORMER_MODEL_NAME}...")
-    # Assuming SENTENCE_TRANSFORMER_MODEL_NAME is now "sentence-transformers/all-MiniLM-L6-v2"
-    embedding_model = SentenceTransformer(settings.SENTENCE_TRANSFORMER_MODEL_NAME, trust_remote_code=True)
-    retrieved_dim = embedding_model.get_sentence_embedding_dimension()
-    if retrieved_dim is not None:
-        EMBEDDING_DIM = retrieved_dim
-    logger.info(f"Embedding model loaded. Dimension: {EMBEDDING_DIM}")
-except Exception as e:
-    logger.exception(f"Error initializing Sentence Transformer model: {e}")
-
-try:
-    logger.info("Initializing tokenizer: cl100k_base...")
-    tokenizer = tiktoken.get_encoding("cl100k_base")
-    logger.info("Tokenizer cl100k_base initialized.")
-except:
-    logger.warning("cl100k_base tokenizer failed, trying gpt2.")
+if not settings.DISABLE_RAG:
+    logger.info("RAG ENABLED: Initializing ingestion service components...")
     try:
-        tokenizer = tiktoken.get_encoding("gpt2")
-        logger.info("Tokenizer gpt2 initialized.")
-    except Exception as e:
-        logger.exception("Failed to initialize any tokenizer.")
+        from sentence_transformers import SentenceTransformer
+        from qdrant_client import QdrantClient
+        import tiktoken
 
+        logger.info("Initializing Qdrant client...")
+        qdrant_client = QdrantClient(
+            url=settings.QDRANT_URL,
+            api_key=settings.QDRANT_API_KEY if settings.QDRANT_API_KEY else None,
+            timeout=20,
+        )
+        logger.info(f"Qdrant client initialized. Target: {settings.QDRANT_URL}")
+
+        logger.info(f"Loading embedding model: {settings.SENTENCE_TRANSFORMER_MODEL_NAME}...")
+        embedding_model = SentenceTransformer(settings.SENTENCE_TRANSFORMER_MODEL_NAME, trust_remote_code=True)
+        retrieved_dim = embedding_model.get_sentence_embedding_dimension()
+        if retrieved_dim is not None:
+            EMBEDDING_DIM = retrieved_dim
+        logger.info(f"Embedding model loaded. Dimension: {EMBEDDING_DIM}")
+
+        logger.info("Initializing tokenizer: cl100k_base...")
+        try:
+            tokenizer = tiktoken.get_encoding("cl100k_base")
+            logger.info("Tokenizer cl100k_base initialized.")
+        except:
+            logger.warning("cl100k_base tokenizer failed, trying gpt2.")
+            tokenizer = tiktoken.get_encoding("gpt2")
+            logger.info("Tokenizer gpt2 initialized.")
+
+    except ImportError as e:
+        logger.critical(f"Failed to import core ML libraries for ingestion_service: {e}. RAG features will be impaired.", exc_info=True)
+    except Exception as e:
+        logger.critical(f"Error during RAG component initialization in ingestion_service: {e}", exc_info=True)
+else:
+    logger.warning("RAG DISABLED: Skipping initialization of ingestion service components.")
 
 # --- Helper Functions ---
 def get_text_tokenizer():
-    if tokenizer is None:
-        logger.error("Tokenizer accessed before initialization.")
-        raise RuntimeError("Tokenizer not initialized")
+    if settings.DISABLE_RAG or tokenizer is None:
+        logger.warning("Tokenizer accessed but RAG is disabled or tokenizer not initialized.")
+        # Fallback or raise error. For assessment, maybe a dummy/no-op.
+        class DummyTokenizer:
+            def encode(self, text): return []
+            def decode(self, tokens): return ""
+        return DummyTokenizer()
     return tokenizer
 
 def count_tokens(text: str) -> int:
-    if not text: return 0
+    if settings.DISABLE_RAG or not text: return 0
+    # ... (rest of your count_tokens, using get_text_tokenizer()) ...
     try:
         return len(get_text_tokenizer().encode(text))
     except Exception as e:
         logger.error(f"count_tokens: Error encoding text: {e}", exc_info=True); return 0
 
+
 async def fetch_article_content(url: str) -> Optional[str]:
+    # This function can remain largely the same as it doesn't depend on ML models
+    # ... (your existing fetch_article_content logic) ...
     logger.info(f"Attempting to fetch URL: {url}")
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.51 Safari/537.36',
@@ -131,6 +139,11 @@ async def fetch_article_content(url: str) -> Optional[str]:
         logger.error(f"Generic error during HTTP fetch for {url}: {e.__class__.__name__} - {e}", exc_info=True); return None
 
     if downloaded_html and downloaded_html.strip():
+        if settings.DISABLE_RAG: # Trafilatura can be heavy, skip if RAG disabled
+            logger.warning("RAG is disabled, skipping trafilatura extraction for assessment mode.")
+            # Return a small part of HTML or a placeholder to show download worked
+            return downloaded_html[:500] + "... (content extraction skipped in RAG-disabled mode)"
+
         logger.debug(f"Proceeding to trafilatura for {url} (HTML length: {len(downloaded_html)})")
         content = extract(downloaded_html, include_comments=False, include_tables=False, output_format='txt', favor_precision=True, url=url)
         if content:
@@ -140,43 +153,39 @@ async def fetch_article_content(url: str) -> Optional[str]:
             logger.warning(f"Trafilatura failed for {url}. Trying BeautifulSoup.")
             try:
                 soup = BeautifulSoup(downloaded_html, 'html.parser')
-                selectors = ['article','main','.main-content','#main-content','.story-body','.article-body','.content','#content','.article__body','.entry-content']
-                for selector in selectors:
-                    elements = soup.select(selector)
-                    if elements:
-                        logger.debug(f"BS found with '{selector}' for {url}")
-                        extracted_bs = "\n".join([el.get_text(separator='\n',strip=True) for el in elements])
-                        extracted_bs = "\n".join([line for line in extracted_bs.splitlines() if line.strip()])
-                        logger.info(f"BS extracted (Length: {len(extracted_bs)}) for: {url}"); return extracted_bs
-                logger.debug(f"BS no specific selectors. Trying body for: {url}")
-                body_text = soup.body.get_text(separator='\n',strip=True) if soup.body else ""
-                body_text = "\n".join([line for line in body_text.splitlines() if line.strip()])
-                if body_text:
-                    logger.info(f"BS body fallback (Length: {len(body_text)}) for: {url}"); return body_text
-                else:
-                    logger.warning(f"BS body fallback resulted in empty content for {url}"); return None
+                # ... (rest of BS logic, or also conditionally skip)
+                # For assessment mode, you might even simplify this further
+                body_text_bs = soup.body.get_text(separator='\n',strip=True) if soup.body else ""
+                body_text_bs = "\n".join([line for line in body_text_bs.splitlines() if line.strip()])
+                logger.info(f"BS body fallback (Length: {len(body_text_bs)}) for: {url}"); return body_text_bs if body_text_bs else None
             except Exception as e_bs:
                 logger.error(f"BS fallback error for {url}: {e_bs}", exc_info=True); return None
     else:
         logger.warning(f"Failed to download or HTML empty/whitespace for: {url}")
     return None
 
+
 def chunk_text(text: str, chunk_size: int = settings.CHUNK_SIZE, chunk_overlap: int = settings.CHUNK_OVERLAP) -> List[str]:
+    if settings.DISABLE_RAG:
+        logger.warning("Chunking attempt while RAG is disabled.")
+        return [text[:chunk_size]] if text else [] # Return a dummy chunk
+    # ... (rest of your chunk_text, using get_text_tokenizer()) ...
     logger.debug(f"chunk_text: Entered. Text length: {len(text)}, Chunk_size: {chunk_size}, Overlap: {chunk_overlap}")
-    if not text or tokenizer is None:
-        logger.warning("chunk_text: No text or tokenizer available."); return []
+    if not text: logger.warning("chunk_text: No text provided."); return []
+    # tokenizer should be the dummy tokenizer if RAG is disabled
+    current_tokenizer = get_text_tokenizer()
     try:
-        tokens = get_text_tokenizer().encode(text)
+        tokens = current_tokenizer.encode(text)
     except Exception as e:
         logger.error(f"chunk_text: Failed to encode text: {e}", exc_info=True); return []
 
     if not tokens: logger.warning("chunk_text: No tokens from text."); return []
-
+    # ... rest of chunking logic
     chunks = []
     current_pos = 0; max_tokens = len(tokens)
     while current_pos < max_tokens:
         end_pos = min(current_pos + chunk_size, max_tokens)
-        chunk_text_content = get_text_tokenizer().decode(tokens[current_pos:end_pos])
+        chunk_text_content = current_tokenizer.decode(tokens[current_pos:end_pos])
         if chunk_text_content.strip(): chunks.append(chunk_text_content.strip())
         if end_pos == max_tokens: break
         step = chunk_size - chunk_overlap
@@ -186,30 +195,31 @@ def chunk_text(text: str, chunk_size: int = settings.CHUNK_SIZE, chunk_overlap: 
     logger.info(f"chunk_text: Original (tokens: {len(tokens)}) chunked into {len(chunks)} chunks.")
     return chunks
 
+
 def ensure_qdrant_collection() -> bool:
-    logger.debug("ensure_qdrant_collection: Entered.")
+    if settings.DISABLE_RAG:
+        logger.info("ensure_qdrant_collection: RAG disabled, skipping Qdrant check.")
+        return True # Pretend it's fine
     if not qdrant_client: logger.error("ensure_qdrant_collection: Qdrant client not initialized."); return False
     if not embedding_model: logger.error("ensure_qdrant_collection: Embedding model not initialized."); return False
+    # ... (rest of your ensure_qdrant_collection logic) ...
     try:
         logger.debug(f"Checking Qdrant collection '{settings.VECTOR_DB_COLLECTION_NAME}'.")
         qdrant_client.get_collection(collection_name=settings.VECTOR_DB_COLLECTION_NAME)
-        # Validate dimension if possible - Qdrant client get_collection doesn't easily give vector_size of existing
         logger.info(f"Collection '{settings.VECTOR_DB_COLLECTION_NAME}' exists. Expected Dim for new points: {EMBEDDING_DIM}")
         return True
     except Exception as e:
-        # More robust check for "not found" type errors
         is_not_found = ("not found" in str(e).lower() or \
                         "collectionnotfoundexception" in str(e).lower().replace("_","") or \
                         (hasattr(e, 'status_code') and e.status_code == 404))
-
         if is_not_found:
             logger.info(f"Collection '{settings.VECTOR_DB_COLLECTION_NAME}' not found. Creating...")
             try:
                 qdrant_client.recreate_collection(
                     collection_name=settings.VECTOR_DB_COLLECTION_NAME,
-                    vectors_config=models.VectorParams(size=EMBEDDING_DIM, distance=models.Distance.COSINE)
+                    vectors_config=qdrant_models.VectorParams(size=EMBEDDING_DIM, distance=qdrant_models.Distance.COSINE) # Use qdrant_models
                 )
-                logger.info(f"Collection '{settings.VECTOR_DB_COLLECTION_NAME}' created successfully with dimension {EMBEDDING_DIM}.")
+                logger.info(f"Collection '{settings.VECTOR_DB_COLLECTION_NAME}' created with dim {EMBEDDING_DIM}.")
                 return True
             except Exception as ce:
                 logger.exception(f"Error CREATING collection '{settings.VECTOR_DB_COLLECTION_NAME}': {ce}")
@@ -220,14 +230,20 @@ def ensure_qdrant_collection() -> bool:
     finally:
         logger.debug("ensure_qdrant_collection: Exiting.")
 
+
 async def ingest_single_article(
     url: Optional[str]=None, text_content: Optional[str]=None,
     source_name: Optional[str]="Unknown", article_id_override: Optional[str]=None
 ) -> Dict:
+    if settings.DISABLE_RAG:
+        logger.warning(f"Ingest attempt for source '{source_name}' while RAG is disabled.")
+        return {"status":"error", "message":"Ingestion and RAG features are disabled in this mode."}
+
     logger.info(f"ingest_single_article: Processing source='{source_name}', URL='{url if url else 'N/A (text provided)'}'")
     if not all([qdrant_client, embedding_model, tokenizer]):
-        logger.error("ingest_single_article: Core components (Qdrant, Embedder, Tokenizer) not initialized.")
-        return {"status":"error", "message":"Core components not initialized."}
+        logger.error("ingest_single_article: Core RAG components not initialized.")
+        return {"status":"error", "message":"Core RAG components not initialized."}
+    # ... (rest of your ingest_single_article logic) ...
     if not ensure_qdrant_collection():
         logger.error("ingest_single_article: Qdrant collection setup failed.")
         return {"status":"error", "message":"Qdrant collection error."}
@@ -250,69 +266,53 @@ async def ingest_single_article(
 
     base_article_id_for_payload = article_id_override or \
                                   (hashlib.sha256(url.encode('utf-8')).hexdigest() if url else str(uuid.uuid4()))
-
     points = []
     for i, chunk in enumerate(filter(str.strip, article_chunks)):
         try:
-            # SentenceTransformer expects a list of texts, encode returns a list of embeddings
             emb = embedding_model.encode([chunk], show_progress_bar=False)[0].tolist()
-
-            point_id = str(uuid.uuid4()) # Unique ID for each Qdrant point (chunk)
-
+            point_id = str(uuid.uuid4())
             payload = {
-                "text": chunk,
-                "source_url": url or "N/A",
-                "source_name": source_name,
-                "article_id": base_article_id_for_payload, # Consistent ID for all chunks of this article
-                "chunk_index": i,
-                "original_text_token_count": count_tokens(actual_content), # Count tokens of the full article
+                "text": chunk, "source_url": url or "N/A", "source_name": source_name,
+                "article_id": base_article_id_for_payload, "chunk_index": i,
+                "original_text_token_count": count_tokens(actual_content),
                 "chunk_token_count": count_tokens(chunk)
             }
             points.append(PointStruct(id=point_id, vector=emb, payload=payload))
         except Exception as e:
             logger.error(f"Error processing chunk {i} for article_id {base_article_id_for_payload}: {e}", exc_info=True)
-            # Optionally skip this chunk and continue, or fail the article
 
     if not points:
-        logger.warning(f"No valid points generated for article_id {base_article_id_for_payload}. Ingestion failed for this article.")
-        return {"status":"warning", "message":f"No valid vector points could be generated for article_id {base_article_id_for_payload}."}
-
+        logger.warning(f"No valid points for article_id {base_article_id_for_payload}.")
+        return {"status":"warning", "message":f"No valid points for article_id {base_article_id_for_payload}."}
     try:
         qdrant_client.upsert(collection_name=settings.VECTOR_DB_COLLECTION_NAME, points=points, wait=True)
-        msg = f"Successfully upserted {len(points)} chunks for article_id {base_article_id_for_payload}"
+        msg = f"Upserted {len(points)} chunks for article_id {base_article_id_for_payload}"
         logger.info(f"ingest_single_article: {msg}")
         return {"status":"success","message":msg,"article_id":base_article_id_for_payload,"num_chunks":len(points)}
     except Exception as e:
         logger.exception(f"Qdrant upsert error for article_id {base_article_id_for_payload}: {e}")
         return {"status":"error","message":f"Qdrant upsert failed: {e}"}
 
+
 # --- Module Import Finalization ---
-# This block runs when the module is imported.
 if __name__ != "__main__":
-    logger.info("ingestion_service.py: Module imported. Performing final checks and initializations.")
-    initialization_ok = True
-    if not qdrant_client:
-        logger.critical("Qdrant client failed to initialize during module load.")
-        initialization_ok = False
-    if not embedding_model:
-        logger.critical("Embedding model failed to initialize during module load.")
-        initialization_ok = False
-    if not tokenizer:
-        logger.critical("Tokenizer failed to initialize during module load.")
-        initialization_ok = False
-
-    if initialization_ok:
-        logger.info("Core components (Qdrant, Embedder, Tokenizer) seem initialized.")
-        logger.info("Ensuring Qdrant collection is ready post-import...")
-        if not ensure_qdrant_collection():
-            logger.critical("CRITICAL (module load): Failed to ensure Qdrant collection is ready after import.")
-        else:
-            logger.info("Qdrant collection confirmed ready post-import.")
+    if settings.DISABLE_RAG:
+        logger.warning("ingestion_service.py: Module imported, RAG features DISABLED.")
     else:
-        logger.critical("One or more core components failed to initialize. Ingestion service may not be functional.")
-else:
-    # This part would be for running the script directly, e.g., for a specific task
-    logger.info("ingestion_service.py: Script run directly (e.g., for testing or specific task).")
-    # You could add __main__ specific logic here if needed, e.g., a small test ingestion.
+        logger.info("ingestion_service.py: Module imported. Performing RAG component checks...")
+        # ... (your existing initialization_ok checks)
+        initialization_ok = True
+        if not qdrant_client: logger.critical("Qdrant client failed to initialize."); initialization_ok = False
+        if not embedding_model: logger.critical("Embedding model failed to initialize."); initialization_ok = False
+        if not tokenizer: logger.critical("Tokenizer failed to initialize."); initialization_ok = False
 
-logger.info("ingestion_service.py: End of file.")
+        if initialization_ok:
+            logger.info("Core RAG components (Qdrant, Embedder, Tokenizer) seem initialized.")
+            if not ensure_qdrant_collection():
+                logger.critical("CRITICAL: Failed to ensure Qdrant collection post-import.")
+            else:
+                logger.info("Qdrant collection confirmed ready post-import.")
+        else:
+            logger.critical("One or more core RAG components failed to initialize.")
+else:
+    logger.info("ingestion_service.py: Script run directly.")
